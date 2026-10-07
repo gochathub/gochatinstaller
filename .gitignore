@@ -1,0 +1,15 @@
+# generated deployments
+gochathub-deploy/
+backups/
+
+# env/secrets
+.env
+*.local
+
+# local agent instructions
+CLAUDE.md
+
+# editor/os junk
+.claude/
+*.swp
+.DS_Store
