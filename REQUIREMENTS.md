@@ -6,14 +6,14 @@ Installer for private self-hosted deployments of [gochathub-server](https://gith
 
 ## Decisions made (with the user)
 
-1. **Caddy serves webui and forwards the API** — `file_server` for the static webui build plus `reverse_proxy` for `/api/*` and `/ws` to the server container. Plain HTTP, **no TLS, no public-internet reverse proxy** role beyond this stack. One port exposed for the whole stack. Matches ADR-016 (cookie sessions, single origin).
+1. **Caddy serves webui and forwards the API** — `file_server` for the static webui build plus `reverse_proxy` for `/api/*` and `/ws` to the server container. Plain HTTP inside the stack: **TLS is terminated by an upstream proxy the operator runs** (not part of this stack); a real public host is treated as https, `--http` opts out. One port exposed for the whole stack. Matches ADR-016 (cookie sessions, single origin).
 2. **Installer = bash script + Makefile.** Script does the full first install interactively; Makefile provides repeat operations (`update`, `logs`, `backup`, `status`, `down`, `restart`).
 3. **Installer builds images from source.** The installer repo carries both Dockerfiles; it clones both upstream repos and runs `docker build`. No changes required to the upstream repos, no external registry dependency.
 4. **MinIO included in the stack.** Attachments and avatar upload work out of the box; S3 env vars wired to the server.
 
 ## Goal
 
-One command on a fresh machine (with `git`, `docker`, `docker compose`, `make`) produces a working goChatHub deployment: web UI reachable over plain HTTP, live messaging working, admin account created, attachments uploadable.
+One command on a fresh machine (with `git`, `docker`, `docker compose`, `make`) produces a working goChatHub deployment: web UI reachable (https behind the operator's TLS proxy, or plain HTTP on localhost / with `--http`), live messaging working, admin account created, attachments uploadable.
 
 ## Stack shape (what the installer must produce)
 
@@ -39,7 +39,7 @@ Volumes: postgres data, minio data, caddy config (persist across restarts). Inte
 - Create the database, run `gochathub-server migrate` (explicit step or `MIGRATIONS_ON_SERVE=1` — design decision, both are documented options).
 - Create the MinIO bucket and wire `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY/S3_REGION/S3_USE_TLS` to the server.
 - Prompt for the **first admin account** (name + password) and create it via the admin CLI (`gochathub-server user create ... --role admin`).
-- Set server env: `DATABASE_URL`, `LISTEN_ADDR`, `COOKIE_SECURE=false` (plain HTTP), `ORIGIN=http://<host>:<port>`, `TRUST_PROXY=true` (Caddy sets `X-Forwarded-For`), `MAX_UPLOAD_BYTES` default.
+- Set server env: `DATABASE_URL`, `LISTEN_ADDR`, `COOKIE_SECURE=true` and `ORIGIN=https://<host>` (false / `http://<host>:<port>` with `--http` or on localhost), `S3_ENDPOINT=http://minio:9000` + `S3_PUBLIC_ENDPOINT=https://<host>` behind the proxy, `TRUST_PROXY=true` (Caddy passes the upstream's `X-Forwarded-*`), `MAX_UPLOAD_BYTES` default.
 - Idempotent re-run: skips completed steps, never destroys data.
 
 **FR-2 Makefile targets** (operate on the generated deployment):
@@ -55,7 +55,7 @@ Volumes: postgres data, minio data, caddy config (persist across restarts). Inte
 - Server: multi-stage Go build, final image runs the single binary with subcommands.
 - Webui: bun-based build (`bun install`, `bun run build`), final stage copies the static `dist/` output (no Node runtime needed at serving time — Caddy serves it).
 
-**FR-4 Caddy configuration:** plain HTTP listener, `file_server` for the webui build, `reverse_proxy` for the API and WebSocket upgrade to the server container. No TLS, no automatic certificates.
+**FR-4 Caddy configuration:** plain HTTP listener, `file_server` for the webui build, `reverse_proxy` for the API and WebSocket upgrade to the server container, plus `/<bucket>/*` to MinIO for presigned attachment URLs. No TLS and no automatic certificates in this stack; trusts `X-Forwarded-*` from private upstream proxies.
 
 - **FR-5 Port collision handling**: at install time, check both published ports (edge, MinIO) against everything listening on the host — Docker-published or not — and auto-shift to the next open port (`preferred +1` up to +20 before failing with flag guidance). Explicitly requested ports (`--port` / `--minio-port`, or existing `.env` values) are strict: taken → fail fast naming the conflict. Re-runs must exclude this deployment's own already-published ports from the check (else the script would flag its own containers as collisions).
 
@@ -81,7 +81,7 @@ Volumes: postgres data, minio data, caddy config (persist across restarts). Inte
 
 ## Out of scope (per current decisions)
 
-- TLS/HTTPS termination, Let's Encrypt, public-internet exposure beyond plain HTTP.
+- TLS/HTTPS termination and certificate management (Let's Encrypt, internal CA): the operator's upstream proxy owns these.
 - ntfy/UnifiedPush push configuration (server supports it, but installer leaves `PUSH_*` unset; browser Web Push still works — VAPID keys auto-generate on first boot).
 - Android client installation.
 - Publishing images to a registry (revisit if installer is shared publicly). If repos become public and GHCR images appear, installer can switch sources — not now.

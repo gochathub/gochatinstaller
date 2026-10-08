@@ -5,9 +5,9 @@ Implements REQUIREMENTS.md. Targets upstream SHAs pinned in `pins.env`; no upstr
 ## 1. Design drivers (from server code, verified)
 
 - All REST under `/api/v1/…`; WS at `GET /api/v1/ws`; health at `/healthz`, `/readyz`, `/version` (unprefixed) — Caddy matcher must cover both prefixes.
-- Attachment upload/download = presigned S3 URLs (minio-go `PresignPut`/`PresignGet`), **host-signed**. The presigned URL's host must equal the browser-visible host. Server runs against `http://minio:9000` internally, so that host would leak into browser URLs and fail. Consequence: **publish MinIO on a second port** and set `S3_ENDPOINT=http://<PUBLIC_HOST>:9000`. This is the one deviation from "one port" in the requirements; unavoidable without a server-side proxy code change.
+- Attachment upload/download = presigned S3 URLs (minio-go `PresignPut`/`PresignGet`), **host-signed**. The presigned URL's host must equal the browser-visible host. Server runs against `http://minio:9000` internally. **https mode** (default for a real host): the server gets `S3_PUBLIC_ENDPOINT=https://<PUBLIC_HOST>` (server change, `8a0e947`) so presigns are signed for the public host while its own calls stay internal; the edge Caddy routes `/<bucket>/*` to MinIO on that same host, so one port and one DNS name serve everything. **`--http` mode**: publish MinIO on a second port and set `S3_ENDPOINT=http://<PUBLIC_HOST>:9000` (no public endpoint).
 - Migrations are rerunnable; explicit `migrate` before `serve`, re-run on each start.
-- Single origin (ADR-016): browser only ever talks to Caddy; `ORIGIN=http://<PUBLIC_HOST>`, `COOKIE_SECURE=false` (plain HTTP by explicit user decision).
+- Single origin (ADR-016): browser only ever talks to Caddy; `ORIGIN=${SCHEME}://<PUBLIC_HOST>`. `SCHEME` is `https` by default for a real `--public-host` (TLS terminated by the operator's upstream proxy; `COOKIE_SECURE=true`) and `http` for localhost, `--http`, or installs whose `.env` predates the setting (`COOKIE_SECURE=false`).
 
 ## 2. Repo layout (this installer repo)
 
@@ -86,14 +86,14 @@ Internal network only; published: `${PUBLISHED_PORT}:80` (caddy), `${MINIO_PUBLI
 
 - `handle` blocks: no directive-order ambiguity. `/api/*` includes `GET /api/v1/ws`; Caddy reverse_proxy upgrades WebSockets transparently.
 - SPA fallback for vue-router history mode; `try_files` before `file_server`.
-- No TLS, no `tls` directive, no ACME, per explicit requirement.
+- No TLS, no `tls` directive, no ACME inside the stack: TLS is the operator's upstream proxy. Global `trusted_proxies static private_ranges` keeps its `X-Forwarded-*`; `/<bucket>/*` goes to `minio:9000` with `Host` untouched (signatures are host-bound).
 
 ## 5. docker-compose.yml
 
 Authoritative file: [`docker-compose.yml`](../docker-compose.yml) in the repo root (copied into the deploy dir verbatim every install). Deltas vs the skeleton first drafted here, all forced by reality:
 
 - **MinIO images gone from registries** (Sep 2026 — community edition archived, deleted from Docker Hub, quay now 401s): containers use `cgr.dev/chainguard/minio` (maintained fork, same S3 API and presigns — verified live) and `cgr.dev/chainguard/minio-client` for the bucket bootstrap. The client one-shot uses the documented `MC_HOST_local` env alias, so no shell-free entrypoint gymnastics; Chainguard images ship `bash` but no `curl`/`wget`, so the MinIO healthcheck is a bash `/dev/tcp/127.0.0.1/9000` probe.
-- **Presign host resolution**: `S3_ENDPOINT=http://${MINIO_PUBLIC_HOST}:${MINIO_PUBLISHED_PORT}`, `MINIO_PUBLIC_HOST` = host part of `PUBLIC_HOST` (derived at install time). When that host is `localhost`, the server service gets `extra_hosts: ["localhost:host-gateway"]` so the server's boot-time bucket check reaches the published (docker-proxy) port, while the presigned URL still reads `localhost:19000` to the browser. LAN-IP hosts need no entry.
+- **Presign host resolution** (`--http`/localhost mode; https mode uses `S3_PUBLIC_ENDPOINT`, see above): `S3_ENDPOINT=http://${MINIO_PUBLIC_HOST}:${MINIO_PUBLISHED_PORT}`, `MINIO_PUBLIC_HOST` = host part of `PUBLIC_HOST` (derived at install time). When that host is `localhost`, the server service gets `extra_hosts: ["localhost:host-gateway"]` so the server's boot-time bucket check reaches the published (docker-proxy) port, while the presigned URL still reads `localhost:19000` to the browser. LAN-IP hosts need no entry.
 - **No ENTRYPOINT in the server image** — cobra would see `sh` as an unknown subcommand when compose passes the serve wrapper as `command`. Compose passes full argv; `ghc` runs `gochathub-server "$@"`.
 - `LISTEN_ADDR` (default `:8080`), `MAX_UPLOAD_BYTES` (server default), `S3_REGION` (minio default `us-east-1`) are server/image defaults — not knobs.
 - Volumes: `pgdata`, `miniodata`. Everything else internal-network only; published: `${PUBLISHED_PORT}:80` and `${MINIO_PUBLISHED_PORT}:9000` (console 9001 stays internal).
@@ -104,7 +104,8 @@ Authoritative file: [`docker-compose.yml`](../docker-compose.yml) in the repo ro
 |---|---|
 | `PUBLISHED_PORT` | prompted, default `8080` (`--port` flag) |
 | `MINIO_PUBLISHED_PORT` | prompted, default `9000` (`--minio-port` flag) |
-| `PUBLIC_HOST` | prompted with default `localhost:<PUBLISHED_PORT>`; LAN deployments set `host:port` reachable from browsers. Drives `ORIGIN`; its host part drives `S3_ENDPOINT` |
+| `PUBLIC_HOST` | prompted (Enter = `localhost:<PUBLISHED_PORT>`, plain HTTP); a real host is `host` (https via upstream proxy) or `host:port` with `--http`. Drives `ORIGIN`; its host part drives the `--http` `S3_ENDPOINT` |
+| `SCHEME` / `COOKIE_SECURE` / `S3_ENDPOINT_URL` / `S3_PUBLIC_ENDPOINT` / `MINIO_BIND` | derived each run from the mode: https -> `https` / `true` / `http://minio:9000` / `https://<host>` / `127.0.0.1:`; http -> `http` / `false` / `http://<host>:<minio port>` / empty / empty |
 | `MINIO_PUBLIC_HOST` | derived (host part of `PUBLIC_HOST`), not a user knob. IPv6-literal hosts unsupported — use a resolvable IPv4/DNS host |
 | `POSTGRES_USER` / `POSTGRES_DB` | `chat` |
 | `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD` | random 32 hex, generated once (kept on re-run) |
@@ -113,7 +114,7 @@ Authoritative file: [`docker-compose.yml`](../docker-compose.yml) in the repo ro
 | `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | optional; `--turnstile-site-key` flag + `TURNSTILE_SECRET` env, or one interactive prompt on a fresh install. Both or neither. Caller values beat the existing `.env` (rotation); re-runs otherwise keep them |
 | `TURNSTILE_HOSTNAME` | derived each run from the host part of `PUBLIC_HOST`; empty for IPs/`localhost` (Turnstile reports hostname without port and cannot match IPs) |
 
-`ORIGIN` and `S3_ENDPOINT` derived from `PUBLIC_HOST` by compose interpolation — single knob for hostname changes.
+`ORIGIN` and the S3 endpoints are derived from `PUBLIC_HOST` and the mode — single knob for hostname changes.
 
 ## 7. Dockerfiles
 
@@ -152,7 +153,7 @@ Tag both `gochathub/{caddy,server}:local`. Builds are run by `install.sh` (not `
 ## 8. `install.sh` flow (idempotent steps, state per step)
 
 1. Check prerequisites: `git`, `docker`, `docker compose`, `ss` (collision probe). Missing → name it, exit 1.
-2. Parse flags: `[target-dir] [--port N] [--minio-port N] [--public-host h:p] [--admin NAME] [--non-interactive] [--sha server=… --sha webui=…]`. Explicit port flags are **strict** (see step 3b): if taken, fail fast naming the conflict (`exit 1`) — no auto-shift for requested values.
+2. Parse flags: `[target-dir] [--port N] [--minio-port N] [--public-host h[:p]] [--http] [--admin NAME] [--non-interactive] [--sha server=… --sha webui=…]`. Explicit port flags are **strict** (see step 3b): if taken, fail fast naming the conflict (`exit 1`) — no auto-shift for requested values.
 3. Load target `.env` if it exists (reuse all generated values; never regenerate passwords). Otherwise generate + write.
 3b. Port collision resolution (FR-5): for each of the two published ports not arriving from an existing `.env` or an explicit flag — probe `ss -ltn` (v4+v6; docker-proxy shows up here too) — preferred busy → `+1` scan up to +20, first free wins, chosen values written to `.env` and reported in the final summary. Re-runs: exclude ports this deployment itself already publishes (`docker compose ps` in the target dir) from the candidate check. Both candidates exhausted → `exit 1` with `--port`/`--minio-port` guidance. If `PUBLIC_HOST` was defaulted and the edge port shifted, recompute its default (`localhost:<new>`); an explicitly passed `--public-host` is never rewritten (mismatch warning printed instead).
 4. Sync clones: clone if absent (public https URLs), then `git fetch` + `git checkout <pin>`. SHA override flag updates the checkout (and optionally pins.env with `--bump-pins`).
@@ -190,8 +191,8 @@ exec docker compose -f "$(dirname "$0")/docker-compose.yml" run --rm server goch
 
 ## 11. Risks / notes
 
-- **Presigned URLs are host-bound** → MinIO must be browser-reachable at `$PUBLIC_HOST:$MINIO_PUBLISHED_PORT`. If the machine is behind NAT without forwarded ports, attachments break while chat still works. Documented in README.
-- Plain HTTP (user decision). Cookies unencrypted on the wire; acceptable for LAN/self-hosted deployments, documented as the user's choice.
+- **Presigned URLs are host-bound** → https mode: the upstream proxy must preserve `Host`, or uploads fail signature checks. `--http` mode: MinIO must be browser-reachable at `$PUBLIC_HOST:$MINIO_PUBLISHED_PORT`; behind NAT without forwarded ports attachments break while chat still works. Documented in README.
+- `--http`/localhost installs send cookies unencrypted and cannot install the PWA or use push off `localhost`; https mode (default for a real host) fixes both and needs the operator's proxy.
 - `TRUST_PROXY=true` only because Caddy forwards; the server must never be exposed without it.
 - Server container restarts re-apply migrations (rerunnable by design).
 - `VAPID` keys auto-generate on first boot and persist in DB. `PUSH_*` left unset (ntfy out of scope).
@@ -211,7 +212,7 @@ exec docker compose -f "$(dirname "$0")/docker-compose.yml" run --rm server goch
 
 ## 11a. Resolved design questions (decided)
 
-- **2nd published port for MinIO** → accepted. `S3_ENDPOINT=http://$PUBLIC_HOST:$MINIO_PUBLISHED_PORT`; only deviation from the one-port shape, forced by host-signed presigned URLs.
+- **2nd published port for MinIO** → only in `--http` mode (`S3_ENDPOINT=http://$PUBLIC_HOST:$MINIO_PUBLISHED_PORT`), forced by host-signed presigned URLs. https mode needs one port and one hostname via the `/<bucket>/*` route.
 - **ntfy push wiring** → strictly later. Generated `.env` leaves `PUSH_*` unset; README documents manual wiring for a future `--ntfy HOST` option. Browser Web Push works out of the box (VAPID auto-generated).
 
 ## 12. Acceptance-criteria mapping

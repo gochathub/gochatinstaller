@@ -21,7 +21,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "${MINIO_PUBLISHED_PORT}:9000"
+      - "${MINIO_BIND}${MINIO_PUBLISHED_PORT}:9000"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -45,15 +45,17 @@ services:
     command: ["sh", "-c", "gochathub-server migrate && exec gochathub-server serve"]
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      COOKIE_SECURE: "false"
-      ORIGIN: http://${PUBLIC_HOST}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      ORIGIN: ${SCHEME}://${PUBLIC_HOST}
       TRUST_PROXY: "true"
       ALLOW_UPLOADS: "1"
-      S3_ENDPOINT: http://${MINIO_PUBLIC_HOST}:${MINIO_PUBLISHED_PORT}
+      S3_ENDPOINT: ${S3_ENDPOINT_URL}
+      # browser-visible presign host; empty = same as S3_ENDPOINT
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-}
       S3_BUCKET: ${S3_BUCKET}
       S3_ACCESS_KEY: ${MINIO_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
-      S3_USE_TLS: "false"
+      S3_USE_TLS: ${S3_USE_TLS}
       # Cloudflare Turnstile on password login; empty secret = off
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
       TURNSTILE_HOSTNAME: ${TURNSTILE_HOSTNAME:-}
@@ -72,10 +74,13 @@ services:
 
   caddy:
     image: gochathub/caddy:local
+    environment:
+      S3_BUCKET: ${S3_BUCKET} # Caddyfile routes /<bucket>/* to minio
     ports:
       - "${PUBLISHED_PORT}:80"
     depends_on:
       - server
+      - minio
 
 volumes:
   pgdata:

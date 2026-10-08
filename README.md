@@ -1,6 +1,6 @@
 # gochatinstaller
 
-Self-hosted goChatHub installer: one command boots [gochathub-server](https://github.com/gochathub/gochathub-server) + [gochathub-webui](https://github.com/gochathub/gochathub-webui) as a Docker Compose stack (Caddy edge serving the web UI, API/WebSocket forwarding, Postgres, MinIO object storage). Plain HTTP, no TLS — run it on a trusted network.
+Self-hosted goChatHub installer: one command boots [gochathub-server](https://github.com/gochathub/gochathub-server) + [gochathub-webui](https://github.com/gochathub/gochathub-webui) as a Docker Compose stack (Caddy edge serving the web UI, API/WebSocket forwarding, Postgres, MinIO object storage). **TLS is not part of the stack**: it terminates at your own upstream proxy, and a real `--public-host` is assumed to be served over HTTPS (see [Behind a TLS proxy](#behind-a-tls-proxy)). Without a host it installs on `localhost` over plain HTTP; `--http` keeps the old plain-HTTP LAN mode.
 
 ## Install
 
@@ -17,7 +17,7 @@ Common flags (all also work with `--non-interactive` for scripted deploys):
 ```sh
 ./install.sh ~/gochathub \
   --port 8080 --minio-port 9000 \
-  --public-host chat.example.lan:8080 \
+  --public-host chat.example.com \
   --admin root
 # scripted:
 ADMIN_PASSWORD=... ./install.sh /opt/ghc --non-interactive --admin root
@@ -27,8 +27,9 @@ ADMIN_PASSWORD=... ./install.sh /opt/ghc --non-interactive --admin root
 |---|---|
 | `[target-dir]` | deployment directory (default `./gochathub-deploy`) |
 | `--port N` | edge HTTP port; **strict** — fails if taken (unrequested default ports auto-shift +1) |
-| `--minio-port N` | MinIO S3 API port, published to the host; same strict/auto rules |
-| `--public-host HOST:PORT` | browser-visible origin (drives session `ORIGIN` and MinIO presigned endpoints) |
+| `--minio-port N` | MinIO S3 API port; published to the host in `--http` mode, loopback-only behind a TLS proxy; same strict/auto rules |
+| `--public-host HOST[:PORT]` | browser-visible host. Default scheme is **https** (terminated by your upstream proxy); drives session `ORIGIN` and the attachment URLs. Omit for `localhost:<port>` over plain HTTP |
+| `--http` | with `--public-host`: plain HTTP instead (LAN/no proxy; MinIO published on `--minio-port`; no app install or push except on `localhost`) |
 | `--admin NAME` + `ADMIN_PASSWORD` env | initial admin account (skipped if one exists) |
 | `--sha server=X --sha webui=Y` | temporary checkout override (interactive use only) |
 | `--bump-pins` | record both repos' current `main` SHAs in `pins.env`, then update |
@@ -108,7 +109,37 @@ TURNSTILE_SECRET=... ./install.sh <target-dir> --non-interactive --turnstile-sit
 
 The web UI is an installable PWA (Chrome desktop/Android) with background Web Push and an in-app "new version" prompt. VAPID keys auto-generate in the database on first boot; set `VAPID_SUBSCRIBER` (`mailto:you@example.com`) in the install environment or the deploy `.env` (re-runs keep it) to give push services a real contact address.
 
-Browsers only allow service workers, install and push on **HTTPS or `localhost`**. This installer serves plain HTTP, so on a LAN IP the app still works as a website but cannot be installed and push stays off. For those features, front the stack with a TLS-terminating proxy and use that URL as `--public-host`. If the proxy caches, keep `/sw.js`, `/index.html` and `/manifest.webmanifest` uncached (the bundled Caddyfile already sets this).
+Browsers only allow service workers, install and push on **HTTPS or `localhost`**, which is why `--public-host` defaults to https. With `--http` on a LAN IP the app still works as a website but cannot be installed and push stays off. If your proxy caches, keep `/sw.js`, `/index.html` and `/manifest.webmanifest` uncached (the bundled Caddyfile already sets this).
+
+## Behind a TLS proxy
+
+Install with `--public-host chat.example.com`, then point your proxy for that name at the installer host's `--port` (default 8080). The proxy must:
+
+- terminate TLS for the hostname and forward everything, WebSockets included;
+- **preserve the `Host` header** (attachment signatures are bound to it) and send `X-Forwarded-For` / `X-Forwarded-Proto`. The bundled Caddy trusts those from private addresses.
+
+```
+# Caddy
+chat.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+```
+# nginx (inside a TLS server block)
+location / {
+	proxy_pass http://127.0.0.1:8080;
+	proxy_set_header Host $host;
+	proxy_set_header X-Forwarded-For $remote_addr;
+	proxy_set_header X-Forwarded-Proto $scheme;
+	proxy_http_version 1.1;
+	proxy_set_header Upgrade $http_upgrade;
+	proxy_set_header Connection "upgrade";
+	client_max_body_size 30m;
+}
+```
+
+Attachments use the same hostname: the edge routes `/<bucket>/*` to MinIO, so the proxy needs no second route or DNS name. The server talks to MinIO internally (`S3_ENDPOINT`) and signs browser URLs for `https://<host>` (`S3_PUBLIC_ENDPOINT`), so it starts even before your DNS and proxy exist.
 
 ## Push notifications (ntfy)
 

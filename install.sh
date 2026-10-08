@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # goChatHub installer — see docs/DESIGN.md.
 # Usage: ./install.sh [target-dir] [--port N] [--minio-port N] [--public-host HOST:PORT]
-#                 [--admin NAME] [--non-interactive] [--sha server=X --sha webui=Y] [--bump-pins]
+#                 [--http] [--admin NAME] [--non-interactive] [--sha server=X --sha webui=Y] [--bump-pins]
 #                 [--turnstile-site-key KEY]   (secret via TURNSTILE_SECRET env)
 set -euo pipefail
 
@@ -16,7 +16,7 @@ randhex() { head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 TARGET=""
 PORT="" MINIO_PORT="" PUBLIC_HOST=""
 ADMIN_NAME=""
-NONINTERACTIVE=0 BUMP_PINS=0
+NONINTERACTIVE=0 BUMP_PINS=0 HTTP_ONLY=0
 SHA_SERVER="" SHA_WEBUI=""
 # Caller-supplied Turnstile values win over a previous run's .env (rotation)
 TS_SITE_KEY_IN="" TS_SECRET_IN="${TURNSTILE_SECRET:-}"
@@ -27,6 +27,7 @@ while [ $# -gt 0 ]; do
 		--minio-port) MINIO_PORT="${2:?}" ; shift 2 ;;
 		--public-host) PUBLIC_HOST="${2:?}" ; shift 2 ;;
 		--admin) ADMIN_NAME="${2:?}" ; shift 2 ;;
+		--http) HTTP_ONLY=1 ; shift ;;
 		--non-interactive) NONINTERACTIVE=1 ; shift ;;
 		--bump-pins) BUMP_PINS=1 ; shift ;;
 		--turnstile-site-key) TS_SITE_KEY_IN="${2:?}" ; shift 2 ;;
@@ -128,9 +129,31 @@ PREFERRED_PORT="${PORT:-8080}"
 PORT="$(shift_port "$PREFERRED_PORT" "${PORT:+port}")"
 PREFERRED_MINIO="${MINIO_PORT:-9000}"
 MINIO_PORT="$(shift_port "$PREFERRED_MINIO" "${MINIO_PORT:+minio-port}")"
+# TLS terminates at an UPSTREAM proxy (not in this stack). A real public host is
+# https by default; --http, or no host at all (localhost is already a secure
+# context), stays plain HTTP. Installs from before this setting keep http.
+if [ "$FRESH" -eq 1 ]; then
+	if [ -z "$PUBLIC_HOST" ] && [ "$NONINTERACTIVE" -eq 0 ]; then
+		read -rp "Public hostname served by your TLS proxy (Enter = localhost, plain HTTP): " PUBLIC_HOST
+	fi
+	if [ -z "$PUBLIC_HOST" ] || [ "$HTTP_ONLY" -eq 1 ]; then SCHEME=http; else SCHEME=https; fi
+else
+	SCHEME="${SCHEME:-http}"
+fi
 : "${PUBLIC_HOST:=localhost:$PORT}" # derived AFTER the shift so ORIGIN/S3_ENDPOINT follow it
 # host-only form for the MinIO presigned endpoint (IPv6 literals unsupported — README)
 MINIO_PUBLIC_HOST="${PUBLIC_HOST%:*}"
+# https: the server reaches MinIO internally; browsers get presigned URLs for the
+# public host, routed by the edge's /<bucket>/* path, so MinIO's own port stays
+# loopback-only. http: one browser-visible endpoint, published directly.
+if [ "$SCHEME" = https ]; then
+	S3_ENDPOINT_URL="http://minio:9000" S3_PUBLIC_ENDPOINT="https://$PUBLIC_HOST"
+	COOKIE_SECURE=true MINIO_BIND="127.0.0.1:"
+else
+	S3_ENDPOINT_URL="http://$MINIO_PUBLIC_HOST:$MINIO_PORT" S3_PUBLIC_ENDPOINT=""
+	COOKIE_SECURE=false MINIO_BIND=""
+fi
+S3_USE_TLS=false # the server's own S3 calls are always plain HTTP (internal or LAN)
 # Turnstile reports the hostname without a port; pin only DNS names (IPs and
 # localhost cannot be Turnstile widget hostnames anyway)
 TURNSTILE_HOSTNAME=""
@@ -190,6 +213,12 @@ TURNSTILE_SITE_KEY=$TURNSTILE_SITE_KEY
 TURNSTILE_SECRET=$TURNSTILE_SECRET
 TURNSTILE_HOSTNAME=$TURNSTILE_HOSTNAME
 VAPID_SUBSCRIBER=${VAPID_SUBSCRIBER:-}
+SCHEME=$SCHEME
+COOKIE_SECURE=$COOKIE_SECURE
+S3_ENDPOINT_URL=$S3_ENDPOINT_URL
+S3_PUBLIC_ENDPOINT=$S3_PUBLIC_ENDPOINT
+S3_USE_TLS=$S3_USE_TLS
+MINIO_BIND=$MINIO_BIND
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -284,9 +313,15 @@ fi
 # ---- 9. summary -------------------------------------------------------------
 echo
 echo "goChatHub is up."
-echo "  web:      http://$PUBLIC_HOST"
-echo "  api:      http://$PUBLIC_HOST/api/v1"
-echo "  minio:    http://$PUBLIC_HOST:$MINIO_PORT (attachments, browser-reachable)"
+echo "  web:      $SCHEME://$PUBLIC_HOST"
+echo "  api:      $SCHEME://$PUBLIC_HOST/api/v1"
+if [ "$SCHEME" = https ]; then
+	echo "  proxy:    point your TLS proxy for $PUBLIC_HOST at this host, port $PORT (keep the Host header)"
+	echo "  minio:    $S3_PUBLIC_ENDPOINT/$S3_BUCKET (attachments, same host via the edge)"
+else
+	echo "  minio:    $S3_ENDPOINT_URL (attachments, browser-reachable)"
+	echo "  note:     plain HTTP: no app install or browser push except on localhost"
+fi
 if [ -n "$TURNSTILE_SECRET" ]; then
 	echo "  captcha:  Cloudflare Turnstile on login${TURNSTILE_HOSTNAME:+ (hostname $TURNSTILE_HOSTNAME)}"
 else

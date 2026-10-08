@@ -1,7 +1,20 @@
+{
+	servers {
+		# an upstream TLS proxy on a private address: keep its X-Forwarded-* headers
+		trusted_proxies static private_ranges
+	}
+}
+
 :80 {
 	@edge path /api/* /healthz /readyz /version
 	handle @edge {
 		reverse_proxy server:8080
+	}
+	# presigned S3 on the public host (path-style /<bucket>/*); Host is passed
+	# through unchanged because the signatures are host-bound
+	@s3 path /{$S3_BUCKET}/*
+	handle @s3 {
+		reverse_proxy minio:9000
 	}
 	handle {
 		# hashed build output never changes under the same name
