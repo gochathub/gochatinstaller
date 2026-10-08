@@ -4,6 +4,18 @@
 		reverse_proxy server:8080
 	}
 	handle {
+		# hashed build output never changes under the same name
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+		# index.html, sw.js, manifest, icons, SPA routes must revalidate, or
+		# old service workers and shells stick around
+		@revalidate not path /assets/*
+		header @revalidate Cache-Control "no-cache"
+
+		@manifest path /manifest.webmanifest
+		header @manifest Content-Type "application/manifest+json"
+
 		try_files {path} /index.html
 		file_server
 	}
