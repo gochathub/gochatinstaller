@@ -48,7 +48,7 @@ graph TB
   B[Browser] --> C
   B[Browser] -- presigned S3 URLs --> M[minio :9000 published]
   C -- static (dist baked in) --> C
-  C -- /api/*, /healthz, /readyz, /version --> S[server :8080]
+  C -- /api/*, /hooks/*, /healthz, /readyz, /version --> S[server :8080]
   S -- migrate + serve --> P[(postgres:16-alpine)]
   S -- presign/PUT/GET --> M
   MC[minio-setup one-shot] --> M
@@ -73,7 +73,7 @@ Internal network only; published: `${PUBLISHED_PORT}:80` (caddy), `${MINIO_PUBLI
 
 ```caddy
 :80 {
-	@edge path /api/* /healthz /readyz /version
+	@edge path /api/* /hooks/* /healthz /readyz /version
 	handle @edge {
 		reverse_proxy server:8080
 	}

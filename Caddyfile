@@ -6,7 +6,9 @@
 }
 
 :80 {
-	@edge path /api/* /healthz /readyz /version
+	# /hooks/*: inbound webhooks (Postmark, Cloudflare Email Worker); without
+	# this they would fall through to the SPA and return 200 with index.html
+	@edge path /api/* /hooks/* /healthz /readyz /version
 	handle @edge {
 		reverse_proxy server:8080
 	}
