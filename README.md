@@ -104,9 +104,15 @@ TURNSTILE_SECRET=... ./install.sh <target-dir> --non-interactive --turnstile-sit
   use Cloudflare's [test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
   (site `1x00000000000000000000AA`, secret `1x0000000000000000000000000000000AA`).
 
+## Install as an app and browser push
+
+The web UI is an installable PWA (Chrome desktop/Android) with background Web Push and an in-app "new version" prompt. VAPID keys auto-generate in the database on first boot; set `VAPID_SUBSCRIBER` (`mailto:you@example.com`) in the install environment or the deploy `.env` (re-runs keep it) to give push services a real contact address.
+
+Browsers only allow service workers, install and push on **HTTPS or `localhost`**. This installer serves plain HTTP, so on a LAN IP the app still works as a website but cannot be installed and push stays off. For those features, front the stack with a TLS-terminating proxy and use that URL as `--public-host`. If the proxy caches, keep `/sw.js`, `/index.html` and `/manifest.webmanifest` uncached (the bundled Caddyfile already sets this).
+
 ## Push notifications (ntfy)
 
-Out of scope by design. Browser Web Push works out of the box (VAPID keys auto-generate in the database on first boot). To enable UnifiedPush for Android, edit `.env` … the compose `server.environment` with:
+Out of scope by design. To enable UnifiedPush for Android, edit `.env` … the compose `server.environment` with:
 
 ```
 PUSH_ALLOW_HOSTS: <your-ntfy-host>

@@ -57,6 +57,8 @@ services:
       # Cloudflare Turnstile on password login; empty secret = off
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
       TURNSTILE_HOSTNAME: ${TURNSTILE_HOSTNAME:-}
+      # Web Push VAPID contact (mailto: or https:); empty = server default
+      VAPID_SUBSCRIBER: ${VAPID_SUBSCRIBER:-}
     # S3_ENDPOINT host is browser-visible (presigned URLs are host-signed).
     # When it is "localhost", map it to the docker host-gateway so the server's
     # boot-time bucket check reaches the published port; LAN-IP hosts need no entry.
