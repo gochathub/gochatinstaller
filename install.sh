@@ -2,12 +2,13 @@
 # goChatHub installer — see docs/DESIGN.md.
 # Usage: ./install.sh [target-dir] [--port N] [--minio-port N] [--public-host HOST:PORT]
 #                 [--admin NAME] [--non-interactive] [--sha server=X --sha webui=Y] [--bump-pins]
+#                 [--turnstile-site-key KEY]   (secret via TURNSTILE_SECRET env)
 set -euo pipefail
 
 INSTALLER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_URL="https://github.com/gochathub"
 
-usage() { sed -n '2,4p' "$0" | sed 's/^# //'; }
+usage() { sed -n '2,5p' "$0" | sed 's/^# //'; }
 die() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*" >&2; }
 randhex() { head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -17,6 +18,8 @@ PORT="" MINIO_PORT="" PUBLIC_HOST=""
 ADMIN_NAME=""
 NONINTERACTIVE=0 BUMP_PINS=0
 SHA_SERVER="" SHA_WEBUI=""
+# Caller-supplied Turnstile values win over a previous run's .env (rotation)
+TS_SITE_KEY_IN="" TS_SECRET_IN="${TURNSTILE_SECRET:-}"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -26,6 +29,7 @@ while [ $# -gt 0 ]; do
 		--admin) ADMIN_NAME="${2:?}" ; shift 2 ;;
 		--non-interactive) NONINTERACTIVE=1 ; shift ;;
 		--bump-pins) BUMP_PINS=1 ; shift ;;
+		--turnstile-site-key) TS_SITE_KEY_IN="${2:?}" ; shift 2 ;;
 		--sha) case "${2:?}" in
 			server=*) SHA_SERVER="${2#server=}" ;;
 			webui=*) SHA_WEBUI="${2#webui=}" ;;
@@ -55,7 +59,9 @@ ENV_FILE="$TARGET/.env"
 CLONES="$TARGET/clones"
 
 # ---- 2. .env: reuse or generate --------------------------------------------
+FRESH=1
 if [ -f "$ENV_FILE" ]; then
+	FRESH=0
 	# shellcheck source=/dev/null
 	source "$ENV_FILE"
 	for k in PUBLISHED_PORT MINIO_PUBLISHED_PORT PUBLIC_HOST POSTGRES_PASSWORD MINIO_ROOT_PASSWORD; do
@@ -66,6 +72,20 @@ else
 	: "${MINIO_ROOT_USER:=gochathub}" ; : "${S3_BUCKET:=gochathub}"
 	POSTGRES_PASSWORD="$(randhex)"; MINIO_ROOT_PASSWORD="$(randhex)"
 fi
+
+# Turnstile (optional captcha on password login): flag/env > existing .env.
+# Site key is public (baked into the web bundle); the secret stays in .env.
+TURNSTILE_SITE_KEY="${TS_SITE_KEY_IN:-${TURNSTILE_SITE_KEY:-}}"
+TURNSTILE_SECRET="${TS_SECRET_IN:-${TURNSTILE_SECRET:-}}"
+if [ "$FRESH" -eq 1 ] && [ "$NONINTERACTIVE" -eq 0 ] && [ -z "$TURNSTILE_SITE_KEY$TURNSTILE_SECRET" ]; then
+	read -rp "Cloudflare Turnstile site key (Enter to skip): " TURNSTILE_SITE_KEY
+	if [ -n "$TURNSTILE_SITE_KEY" ]; then
+		read -rsp "Turnstile secret key: " TURNSTILE_SECRET; echo
+	fi
+fi
+{ [ -n "$TURNSTILE_SITE_KEY" ] && [ -n "$TURNSTILE_SECRET" ]; } \
+	|| { [ -z "$TURNSTILE_SITE_KEY" ] && [ -z "$TURNSTILE_SECRET" ]; } \
+	|| die "Turnstile needs both --turnstile-site-key and TURNSTILE_SECRET (or neither)"
 
 # .env keys are the compose-facing names; map them to the port variables
 [ -n "$PORT" ] || PORT="${PUBLISHED_PORT:-}"
@@ -111,6 +131,13 @@ MINIO_PORT="$(shift_port "$PREFERRED_MINIO" "${MINIO_PORT:+minio-port}")"
 : "${PUBLIC_HOST:=localhost:$PORT}" # derived AFTER the shift so ORIGIN/S3_ENDPOINT follow it
 # host-only form for the MinIO presigned endpoint (IPv6 literals unsupported — README)
 MINIO_PUBLIC_HOST="${PUBLIC_HOST%:*}"
+# Turnstile reports the hostname without a port; pin only DNS names (IPs and
+# localhost cannot be Turnstile widget hostnames anyway)
+TURNSTILE_HOSTNAME=""
+if [ -n "$TURNSTILE_SECRET" ] && [ "$MINIO_PUBLIC_HOST" != localhost ] \
+	&& ! [[ "$MINIO_PUBLIC_HOST" =~ ^[0-9.]+$ ]]; then
+	TURNSTILE_HOSTNAME="$MINIO_PUBLIC_HOST"
+fi
 
 # ---- 4. clones at pinned SHAs ----------------------------------------------
 sync_clone() { # $1 key word (SERVER|WEBUI), $2 repo, $3 sha
@@ -159,6 +186,9 @@ POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 MINIO_ROOT_USER=${MINIO_ROOT_USER:-gochathub}
 MINIO_ROOT_PASSWORD=$MINIO_ROOT_PASSWORD
 S3_BUCKET=${S3_BUCKET:-gochathub}
+TURNSTILE_SITE_KEY=$TURNSTILE_SITE_KEY
+TURNSTILE_SECRET=$TURNSTILE_SECRET
+TURNSTILE_HOSTNAME=$TURNSTILE_HOSTNAME
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -207,6 +237,7 @@ docker build -q -t gochathub/server:local \
 	-f "$INSTALLER_DIR/docker/server.Dockerfile" "$CLONES/gochathub-server"
 info "building gochathub/caddy:local (webui dist baked in)"
 docker build -q -t gochathub/caddy:local \
+	--build-arg "VITE_TURNSTILE_SITE_KEY=$TURNSTILE_SITE_KEY" \
 	-f "$INSTALLER_DIR/docker/caddy.Dockerfile" "$TARGET"
 
 # ---- 7. start + wait --------------------------------------------------------
@@ -255,6 +286,12 @@ echo "goChatHub is up."
 echo "  web:      http://$PUBLIC_HOST"
 echo "  api:      http://$PUBLIC_HOST/api/v1"
 echo "  minio:    http://$PUBLIC_HOST:$MINIO_PORT (attachments, browser-reachable)"
+if [ -n "$TURNSTILE_SECRET" ]; then
+	echo "  captcha:  Cloudflare Turnstile on login${TURNSTILE_HOSTNAME:+ (hostname $TURNSTILE_HOSTNAME)}"
+else
+	echo "  captcha:  off (re-run with --turnstile-site-key KEY and TURNSTILE_SECRET to enable)"
+fi
+echo "  2fa:      users enable it in Settings > Account; lost device: ./ghc user 2fa-reset <name>"
 echo "  cli:      cd $TARGET && ./ghc <user|room|token> ..."
 echo "  ops:      cd $TARGET && make help"
 echo "  data:     $TARGET (docker volumes pgdata, miniodata)"

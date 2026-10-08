@@ -32,6 +32,7 @@ ADMIN_PASSWORD=... ./install.sh /opt/ghc --non-interactive --admin root
 | `--admin NAME` + `ADMIN_PASSWORD` env | initial admin account (skipped if one exists) |
 | `--sha server=X --sha webui=Y` | temporary checkout override (interactive use only) |
 | `--bump-pins` | record both repos' current `main` SHAs in `pins.env`, then update |
+| `--turnstile-site-key KEY` + `TURNSTILE_SECRET` env | enable Cloudflare Turnstile on login (both or neither; see below) |
 
 The stack publishes **two host ports**: edge HTTP (`PUBLISHED_PORT`) and the MinIO S3 API (`MINIO_PUBLISHED_PORT`) — attachment uploads use presigned URLs that the browser fetches directly. If the machine sits behind NAT without forwarded ports, chat works but attachments don't.
 
@@ -66,6 +67,42 @@ MinIO objects live in the `miniodata` named volume; to move them, tar the volume
 ### IPv6 note
 
 `--public-host` must be an IPv4 or DNS host. IPv6 literals break the MinIO presigned host derivation (use a DNS name or IPv4).
+
+## Login protection
+
+### Two-factor authentication (TOTP)
+
+Nothing to configure — it ships with the pinned server/web pair. Each user opts
+in under Settings → Account → Two-factor authentication (QR code + one-time
+backup codes). If a user loses their authenticator, an admin removes the factor
+and revokes their sessions:
+
+```sh
+./ghc user 2fa-reset <username>
+```
+
+### Cloudflare Turnstile (optional captcha)
+
+Adds a Turnstile widget to the sign-in form; the server verifies each token
+with Cloudflare before checking the password. Off unless you give both keys
+(create a widget in the Cloudflare dashboard first):
+
+```sh
+# first install, interactive: the installer asks once (Enter skips)
+# scripted / re-configure an existing install:
+TURNSTILE_SECRET=... ./install.sh <target-dir> --non-interactive --turnstile-site-key <site key>
+```
+
+- The **site key** is public and is baked into the web bundle at image-build
+  time, so changing it rebuilds the caddy image. The **secret** only lives in
+  the deploy dir's `.env` (mode 0600) and is passed to the server container.
+- Re-runs keep the stored keys; pass new values to rotate them.
+- When `--public-host` is a DNS name the installer also pins tokens to that
+  hostname (`TURNSTILE_HOSTNAME`). It does not pin IPs or `localhost`.
+- Turnstile widgets need a DNS hostname in the Cloudflare dashboard's hostname
+  list — an IP-only install (the default `localhost:PORT` or a LAN IP) can only
+  use Cloudflare's [test keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
+  (site `1x00000000000000000000AA`, secret `1x0000000000000000000000000000000AA`).
 
 ## Push notifications (ntfy)
 

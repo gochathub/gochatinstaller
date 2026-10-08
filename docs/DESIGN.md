@@ -110,6 +110,8 @@ Authoritative file: [`docker-compose.yml`](../docker-compose.yml) in the repo ro
 | `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD` | random 32 hex, generated once (kept on re-run) |
 | `MINIO_ROOT_USER` | `gochathub` |
 | `S3_BUCKET` | `gochathub` |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | optional; `--turnstile-site-key` flag + `TURNSTILE_SECRET` env, or one interactive prompt on a fresh install. Both or neither. Caller values beat the existing `.env` (rotation); re-runs otherwise keep them |
+| `TURNSTILE_HOSTNAME` | derived each run from the host part of `PUBLIC_HOST`; empty for IPs/`localhost` (Turnstile reports hostname without port and cannot match IPs) |
 
 `ORIGIN` and `S3_ENDPOINT` derived from `PUBLIC_HOST` by compose interpolation — single knob for hostname changes.
 
@@ -200,6 +202,12 @@ exec docker compose -f "$(dirname "$0")/docker-compose.yml" run --rm server goch
 - Probe: `ss -ltn` parse both v4 and v6 listen lines; `docker-proxy` listeners included, so a busy Docker port reads as busy even when `docker ps` would show nothing for the current target. `ss` missing → fail at prerequisites (step 1) naming it; one tool, one code path.
 - Strict precedence: existing `.env` value == explicit flag == strict. Only freshly-generated values auto-shift. Consequence: first install with defaults shifts freely; every later `make install` keeps the shifted `.env` values unless the user edits them deliberately.
 - Own-port exclusion on re-run computed from `docker compose ps --format json` in the target dir (published ports of this project only), never from a network-wide docker scan.
+
+## 11c. 2FA and Turnstile
+
+- **2FA** needs no installer configuration: server migration `003_totp.sql` runs in the existing `migrate && serve` command. The only installer work is the pin bump (`pins.env`) and documentation (`./ghc user 2fa-reset`).
+- **Turnstile** has two halves with different lifetimes. The *secret* and hostname are runtime env on the `server` service (`${TURNSTILE_SECRET:-}`; empty disables the check server-side). The *site key* is public but read by Vite at build time, so it enters the caddy image as the build arg `VITE_TURNSTILE_SITE_KEY` (caddy.Dockerfile stage 1); changing it requires the caddy image rebuild that `install.sh` already does on every run. The secret is never a build arg (it would persist in image layers).
+- Unset keys = no widget and no server check, so existing installs behave as before.
 
 ## 11a. Resolved design questions (decided)
 
